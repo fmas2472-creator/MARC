@@ -16,115 +16,20 @@ fprintf('============================================\n');
 
 par = load('MRAC_parameters.mat');
 
-c = struct();
-
-%% مدل واقعی
-
-c.A = par.A5;
-c.B = par.B5;
-c.C = par.C5;
-
-%% مدل مرجع MIMO
-
-c.Am = blkdiag(par.Am_eta,par.Am_T);
-
-c.Bm = [
-    par.Bm_eta                 zeros(size(par.Bm_eta));
-    zeros(size(par.Bm_T))       par.Bm_T
-];
-
-c.Cm = [
-    par.Cm_eta                 zeros(size(par.Cm_eta));
-    zeros(size(par.Cm_T))       par.Cm_T
-];
-
-%% بررسی ابعاد مدل‌ها
-
-assert(isequal(size(c.A),[5 5]) && ...
-       isequal(size(c.Am),[4 4]), ...
-       'Expected five plant states and four reference states.');
-
-assert(norm(par.D5,'fro') < 1e-12 && ...
-       norm(par.Dm_eta,'fro') < 1e-12 && ...
-       norm(par.Dm_T,'fro') < 1e-12, ...
-       'This code requires zero direct feedthrough.');
-
-assert(isequal(size(par.Theta0),[2 4]), ...
-       'Theta0 must be 2-by-4. Run the updated Part 11.');
-
 %% -------------------------------------------------
-%% خواندن تنظیمات از Part 11
+%% ساخت تنظیمات — منبع واحد
 %% -------------------------------------------------
+% تمام تنظیمات (گاما، کران تتا، لیکیج، anti-windup، کران ورودی‌ها) از
+% MRAC_parameters.mat خوانده و در build_mrac_config ساخته می‌شوند.
+% هیچ عدد تنظیمی نباید در این فایل بازتعریف شود.
 
-c.target = par.target;
-c.ys = par.ys;
+[c, c_info] = build_mrac_config(par);
 
-c.u_min = [
-    par.dQi_min;
-    par.dQc_min
-];
+Kdc            = c_info.Kdc;
+Kdc_decoupled  = c_info.Kdc_decoupled;
+Kdc_normalized = c_info.Kdc_normalized;
 
-c.u_max = [
-    par.dQi_max;
-    par.dQc_max
-];
-
-% بهره تطبیق هشت ضریب
-c.gamma = repmat( ...
-    [par.gamma_eta; par.gamma_T],par.n_phi,1);
-
-% حدود ضرایب تطبیقی
-c.theta_min = par.theta_min;
-c.theta_max = par.theta_max;
-
-% پارامترهای Anti-Windup و Leakage
-c.K_aw = par.K_aw;
-c.sigma = par.sigma;
-
-% پارامتر epsilon از Part 11 خوانده می‌شود.
-% قانون MIT فعلی بدون نرمال‌سازی حفظ شده است.
-c.epsilon = par.epsilon;
-
-%% بررسی تنظیمات
-
-assert(all(c.gamma > 0) && ...
-       all(isfinite(c.gamma)), ...
-       'Invalid MIT adaptation gains.');
-
-assert(c.theta_min < c.theta_max, ...
-       'Invalid adaptive parameter limits.');
-
-assert(isscalar(c.sigma) && ...
-       isfinite(c.sigma) && c.sigma >= 0, ...
-       'Invalid leakage coefficient.');
-
-assert(isscalar(c.K_aw) && ...
-       isfinite(c.K_aw) && c.K_aw >= 0, ...
-       'Invalid Anti-Windup gain.');
-
-assert(all(par.Theta0(:) >= c.theta_min & ...
-           par.Theta0(:) <= c.theta_max), ...
-       'Initial adaptive parameters are outside projection limits.');
-
-%% -------------------------------------------------
-%% محاسبه بهره DC و مقیاس‌بندی
-%% -------------------------------------------------
-
-Kmr = -c.Cm*(c.Am\c.Bm);
-
-Kdc = -c.C*(c.A\c.B);
-
-assert(rcond(Kmr)>1e-12 && rcond(Kdc)>1e-12, ...
-       'Singular DC gain.');
-
-% ورودی مدل مرجع برای رسیدن به هدف
-c.r = Kmr\c.target;
-
-% ماتریس خروجی در مقیاس جدید
-c.Cn = diag(1./c.ys)*c.C;
-
-% دیکاپلر استاتیکی موجود پروژه
-c.Umap = Kdc\diag(c.ys);
+fprintf('Input limit source: %s\n',c_info.u_limit_source);
 %% بررسی دیکاپلر استاتیکی موجود
 
 fprintf('\n--- Static Decoupler Check ---\n');
@@ -694,10 +599,21 @@ function dX = simple_mit_ode(~,X,c)
     %% حساسیت نسبت به ضرایب تطبیقی
     % لحاظ کردن اثر اشباع در حساسیت
 
-    L = diag(double( ...
-        (u_raw > c.u_min) & ...
-        (u_raw < c.u_max)));
+      if isfield(c,'smooth_sat') && c.smooth_sat
 
+        % شاخص اشباع پیوسته در [0,1]: RHS ناپیوسته نمی‌شود.
+        k_s  = 200;
+        s_lo = 0.5*(1+tanh(k_s*(u_raw-c.u_min)));
+        s_hi = 0.5*(1+tanh(k_s*(c.u_max-u_raw)));
+        L    = diag(min(s_lo,s_hi));
+
+    else
+
+        L = diag(double( ...
+            (u_raw > c.u_min) & ...
+            (u_raw < c.u_max)));
+
+    end
     Be = c.B*L*c.Umap;
 
     Acl = c.A-Be*W(:,3:4)*c.Cn;
@@ -710,26 +626,34 @@ function dX = simple_mit_ode(~,X,c)
     %% قانون MIT
     %% -------------------------------------------------
 
-    w_dot_mit = -c.gamma .* (Psi'*en);
+        %% نرمال‌سازی رگرسور (از منبع واحد: c.adapt_normalize)
+
+    if isfield(c,'adapt_normalize') && ~c.adapt_normalize
+        m2 = 1;
+    else
+        m2 = 1 + phi'*phi;
+    end
+
+    w_dot_mit = -c.gamma .* ((Psi'*en)/m2);
 
     % تبدیل بردار مشتق به ماتریس 2 در 4
     W_dot = reshape(w_dot_mit,2,4);
 
+      %% -------------------------------------------------
+    %% Leakage + Anti-Windup  (mrac_antiwindup)
     %% -------------------------------------------------
-    %% Leakage
-    %% -------------------------------------------------
+    %  لایه ۱: r_eff  = ورودی مرجع قابل دستیابی (آشکارسازی اشباع در مدل مرجع)
+    %  لایه ۲: sigma_eff = sigma + sigma_aw*sat_frac + sigma_e*||en||
 
-    W_dot = W_dot-c.sigma*W;
+    [r_eff, sigma_eff] = mrac_antiwindup(c,u,u_raw,en);
 
-    %% -------------------------------------------------
-    %% Anti-Windup
-    %% Back-calculation در مختصات W
-    %% -------------------------------------------------
+    W_dot = W_dot-sigma_eff*W;
 
+    % back-calculation در مختصات W
     virtual_sat_error = c.Umap\sat_error;
 
     W_dot = W_dot + ...
-        c.K_aw*virtual_sat_error*phi';
+        c.K_aw*virtual_sat_error*phi'/m2;
 
     %% -------------------------------------------------
     %% Projection
@@ -754,8 +678,8 @@ function dX = simple_mit_ode(~,X,c)
     %% دینامیک مدل مرجع
     %% -------------------------------------------------
 
-    xm_dot = c.Am*xm+c.Bm*c.r;
-
+       % ورودی مرجع «قابل دستیابی» 
+    xm_dot = c.Am*xm+c.Bm*r_eff;
     %% -------------------------------------------------
     %% خروجی تابع
     %% -------------------------------------------------

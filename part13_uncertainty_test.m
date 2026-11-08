@@ -1,4 +1,4 @@
-function results = part13_uncertainty_test(p, xss)
+function results = part13_uncertainty_test(p, xss, cases, cfg_override)
 %% =========================================================
 % آزمون عدم قطعیت پارامترهای فیزیکی
 % مقایسه PI و MIT-MRAC روی مدل غیرخطی هفت حالته
@@ -11,15 +11,57 @@ fprintf('\n============================================\n');
 fprintf(' NONLINEAR PARAMETER UNCERTAINTY TEST\n');
 fprintf('============================================\n');
 
-%% تنظیمات کنترلرها از فایل‌های موجود
+%% انتخاب کیس‌ها
+% پیش‌فرض: همه‌ی هفت کیس.
+% برای اجرای سریع فقط کیس‌های مورد نظر، بردار شماره‌ی آن‌ها را بدهید:
+%   part13_uncertainty_test(p,X_linearization,[6 7])
+if nargin < 3 || isempty(cases)
+    cases = 1:7;
+end
+cases = cases(cases >= 1 & cases <= 7);
 
-mr = load('MRAC_MIT_simple_results.mat','c');
-par = load('MRAC_parameters.mat');
+%% ---------------------------------------------------------
+%% تنظیمات کنترلرها — منبع واحد: MRAC_parameters.mat (خروجی Part 11)
+%% ---------------------------------------------------------
+% نسخه‌ی قبلی تنظیمات را از خروجی Part 12 (MRAC_MIT_simple_results.mat)
+% می‌گرفت و همزمان از MRAC_parameters.mat؛ دو منبع برای یک کمیت.
+% حالا فقط از منبع واحد ساخته می‌شود و اگر فایل کهنه باشد assert می‌گیرد.
+
+par     = load('MRAC_parameters.mat');
 pi_data = load('PI_baseline.mat','C_eta','C_T');
 
-cfg = mr.c;
-cfg.Kp = [pi_data.C_eta.Kp; pi_data.C_T.Kp];
-cfg.Ki = [pi_data.C_eta.Ki; pi_data.C_T.Ki];
+% تطابق فایل پارامترها با پلنت فعلی (جلوگیری از تناقض کهنه‌بودن)
+if all(isfield(par,{'Qi_bar','Qc_bar','Qm_bar'}))
+    assert(abs(par.Qi_bar-p.Qi_bar) < 1e-9 && ...
+           abs(par.Qc_bar-p.Qc_bar) < 1e-9 && ...
+           abs(par.Qm_bar-p.Qm_bar) < 1e-9, ...
+           ['MRAC_parameters.mat با p فعلی هم‌خوان نیست. ' ...
+            'Part 11 را دوباره اجرا کنید.']);
+end
+
+ctl_opts = struct();
+ctl_opts.Kp = [pi_data.C_eta.Kp; pi_data.C_T.Kp];
+ctl_opts.Ki = [pi_data.C_eta.Ki; pi_data.C_T.Ki];
+
+% فاصله‌ی چاپ پیشرفت شبیه‌سازی [h]
+ctl_opts.verbose_every = 25;
+
+cfg = build_mrac_config(par,ctl_opts);
+
+% بازنویسی آگاهانه از بیرون (برای Part 14 / tune_antiwindup)
+if nargin >= 4 && ~isempty(cfg_override)
+    fn = fieldnames(cfg_override);
+    for ii = 1:numel(fn)
+        cfg.(fn{ii}) = cfg_override.(fn{ii});
+        fprintf('  cfg.%s overridden -> %s\n',fn{ii},mat2str(cfg_override.(fn{ii})));
+    end
+end
+
+fprintf('\n--- Controller settings (single source: Part 11) ---\n');
+fprintf('adapt_normalize=%d | adapt_deadzone=%.3g | smooth_sat=%d\n', ...
+    cfg.adapt_normalize,cfg.adapt_deadzone,cfg.smooth_sat);
+fprintf('aw_leakage=%d | sigma=%.4g | sigma_aw=%.4g | sigma_e=%.4g | K_aw=%.4g | K_aw_ref=%.4g\n', ...
+    cfg.aw_leakage,cfg.sigma,cfg.sigma_aw,cfg.sigma_e,cfg.K_aw,cfg.K_aw_ref);
 
 xss = xss(:);
 
@@ -36,14 +78,14 @@ cfg.ybase = reactor_output(xss,p,0);
 % Qc >= 0
 % Qs = 1.5*Qm - Qi >= 0
 
-cfg.u_min = max(cfg.u_min, ...
-    [-p.Qi_bar; -p.Qc_bar]);
-
-cfg.u_max(1) = min(cfg.u_max(1), ...
-    1.5*p.Qm_bar-p.Qi_bar);
-
-assert(all(cfg.u_min < cfg.u_max), ...
-    'Invalid physical input limits.');
+% کران‌ها این‌بار در build_mrac_config اعمال شده‌اند (منبع واحد)؛
+% اینجا فقط صحت‌سنجی می‌کنیم که قیدهای فیزیکی رعایت شده باشند.
+assert(cfg.u_min(1) >= -p.Qi_bar-1e-9, ...
+    'Qi < 0 allowed: input limits were not built from the single source.');
+assert(cfg.u_min(2) >= -p.Qc_bar-1e-9, ...
+    'Qc < 0 allowed: input limits were not built from the single source.');
+assert(cfg.u_max(1) <= 1.5*p.Qm_bar-p.Qi_bar+1e-9, ...
+    'Qs < 0 allowed: input limits were not built from the single source.');
 
 fprintf('Common dQi limits: [%.3f, %.3f]\n', ...
     cfg.u_min(1),cfg.u_max(1));
@@ -78,13 +120,21 @@ controller_names = {'PI','MIT'};
 tgrid = linspace(0,par.t_final,par.n_samples);
 
 % NonNegative مربوط به هفت حالت فیزیکی است.
-opts = odeset(par.ode_options, ...
+% تنظیمات حل‌گر: پیش‌فرض از Part 11؛ قابل بازنویسی برای جست‌وجوی سریع
+if isfield(cfg,'ode_options') && ~isempty(cfg.ode_options)
+    base_ode = cfg.ode_options;
+    fprintf('(solver: cfg.ode_options override — نتایج برای گزارش نهایی نیست)\n');
+else
+    base_ode = par.ode_options;
+end
+
+opts = odeset(base_ode, ...
     'NonNegative',1:7, ...
-    'OutputFcn',@ode_progress);
+    'OutputFcn',@(t,y,flag) ode_progress(t,y,flag,cfg.verbose_every));
 
 %% اجرای آزمون‌ها
 
-for ic = 1:7
+for ic = cases
 
     p_case = p;
 
@@ -95,7 +145,15 @@ for ic = 1:7
 
     fprintf('\n---------- %s ----------\n',case_names{ic});
 
-    for jc = 1:2
+    % اگر cfg.skip_pi = true باشد فقط MIT اجرا می‌شود (برای tune_gamma).
+    % PI به gamma وابسته نیست، پس تکرارش وقت تلف کردن است.
+    if isfield(cfg,'skip_pi') && cfg.skip_pi
+        jc_list = 2;
+    else
+        jc_list = 1:2;
+    end
+
+    for jc = jc_list
 
         if jc == 1
             % هفت حالت واقعی + چهار حالت مرجع
@@ -108,13 +166,46 @@ for ic = 1:7
                   par.Theta0(:); par.S0(:)];
         end
 
-        [tt,ZZ] = ode45( ...
-            @(t,z) uncertainty_ode(t,z,p_case,cfg,jc), ...
-            tgrid,z0,opts);
+        % یک کیس خراب نباید کل مطالعه را از بین ببرد.
+        ok = true;
+        fail_msg = '';
 
-        if tt(end) < par.t_final-1e-6
-            error('Incomplete simulation: %s / %s', ...
-                case_names{ic},controller_names{jc});
+        try
+
+            [tt,ZZ] = ode45( ...
+                @(t,z) uncertainty_ode(t,z,p_case,cfg,jc), ...
+                tgrid,z0,opts);
+
+            if isempty(tt) || tt(end) < par.t_final-1e-6
+                ok = false;
+                fail_msg = 'simulation did not reach t_final';
+            end
+
+        catch ME
+
+            ok = false;
+            fail_msg = ME.message;
+            tt = [];  ZZ = [];
+
+            % محل دقیق خطا (بدون این، پیام «Index exceeds ...» بی‌فایده است)
+            for kk = 1:min(numel(ME.stack),3)
+                fprintf(2,'     at %s (line %d)\n', ...
+                    ME.stack(kk).name,ME.stack(kk).line);
+            end
+
+        end
+
+        if ~ok
+
+            fprintf(2,'  !! FAILED (%s / %s): %s\n', ...
+                case_names{ic},controller_names{jc},fail_msg);
+
+            results(ic,jc).scenario   = case_names{ic};
+            results(ic,jc).controller = controller_names{jc};
+            results(ic,jc).failed     = true;
+            results(ic,jc).message    = fail_msg;
+
+            continue
         end
 
         yy = zeros(numel(tt),2);
@@ -149,6 +240,13 @@ for ic = 1:7
 
         results(ic,jc).scenario = case_names{ic};
         results(ic,jc).controller = controller_names{jc};
+        results(ic,jc).failed   = false;
+        results(ic,jc).message  = '';
+
+        % شکست فیزیکی (نه عددی): آیا آغازگر شسته شد؟
+        results(ic,jc).min_I       = min(ZZ(:,1));
+        results(ic,jc).I_washout   = min(ZZ(:,1)) < 1e-2*xss(1);
+        results(ic,jc).sat_fraction = saturation/par.t_final;
         results(ic,jc).t = tt;
         results(ic,jc).y = yy;
         results(ic,jc).ym = ym;
@@ -157,7 +255,12 @@ for ic = 1:7
         results(ic,jc).IAE = iae;
         results(ic,jc).final_error = final_error;
         results(ic,jc).saturation = saturation;
-
+        % تشخیص: آیا ضرایب W به کران theta_min/theta_max چسبیدهاند؟
+        % z = [x(7); xm(4); W(8); S(40)]  →  W در ستونهای 12..19
+        if jc == 2 && size(ZZ,2) >= 19
+            results(ic,jc).W_final = ZZ(end,12:19);
+            results(ic,jc).W_max   = max(abs(ZZ(end,12:19)));
+        end
         fprintf('%s\n',controller_names{jc});
 
         fprintf('  Final target error: eta=% .6e, T=% .6e\n', ...
@@ -168,6 +271,54 @@ for ic = 1:7
 
         fprintf('  Saturation [h]: Qi=%.3f, Qc=%.3f\n', ...
             saturation(1),saturation(2));
+        if isfield(results(ic,jc),'W_max') && ~isempty(results(ic,jc).W_max)
+            fprintf('  max|W| = %.4f  (bound = %.3g)\n', ...
+                results(ic,jc).W_max,cfg.theta_max);
+        end
+        if results(ic,jc).I_washout
+            fprintf(2,'  !! PHYSICAL FAILURE: initiator washout (min I = %.3e)\n', ...
+                results(ic,jc).min_I);
+        end
+    end
+end
+
+%% جدول خلاصه
+
+fprintf('\n================ SUMMARY ================\n');
+fprintf('%-10s %-5s %11s %11s %10s %10s  %s\n', ...
+    'case','ctrl','IAE_eta','IAE_T','finE_eta','finE_T','flag');
+
+for ic = 1:size(results,1)
+    for jc = 1:size(results,2)
+
+        % توجه: متلب عناصر ساخته‌نشده‌ی struct array را با فیلدهای خالی
+        % ([]) پر می‌کند؛ پس isfield تنها کافی نیست و isempty هم لازم است.
+        has_run = isfield(results(ic,jc),'IAE') && ~isempty(results(ic,jc).IAE);
+
+        if ~has_run
+
+            if isfield(results(ic,jc),'failed') && ~isempty(results(ic,jc).failed) ...
+                    && results(ic,jc).failed
+                fprintf('%-10s %-5s %11s %11s %10s %10s  FAILED\n', ...
+                    case_names{ic},controller_names{jc},'-','-','-','-');
+            end
+            continue
+        end
+
+        flag = '';
+        if isfield(results(ic,jc),'I_washout') && ~isempty(results(ic,jc).I_washout) ...
+                && results(ic,jc).I_washout
+            flag = [flag 'WASHOUT '];
+        end
+        if isfield(results(ic,jc),'sat_fraction') && ~isempty(results(ic,jc).sat_fraction) ...
+                && any(results(ic,jc).sat_fraction > 0.5)
+            flag = [flag 'SATURATED '];
+        end
+
+        fprintf('%-10s %-5s %11.4g %11.4g %10.2e %10.2e  %s\n', ...
+            case_names{ic},controller_names{jc}, ...
+            results(ic,jc).IAE(1),results(ic,jc).IAE(2), ...
+            results(ic,jc).final_error(1),results(ic,jc).final_error(2),flag);
     end
 end
 
@@ -180,6 +331,10 @@ output_names = {'Delta viscosity','Delta temperature'};
 
 for ig = 1:3
 
+    if isfield(cfg,'make_plots') && ~cfg.make_plots
+        break
+    end
+
     figure('Name', ...
         ['Uncertainty comparison - ' group_names{ig}]);
 
@@ -187,32 +342,54 @@ for ig = 1:3
 
         ic = groups(ig,col);
 
+        have_pi  = isfield(results(ic,1),'IAE') && numel(results(ic,1).IAE) >= 2;
+        have_mit = isfield(results(ic,2),'IAE') && numel(results(ic,2).IAE) >= 2;
+
+        if ~have_pi && ~have_mit
+            fprintf(2,'[plot] no data for %s\n',case_names{ic});
+            continue
+        end
+
         for out = 1:2
 
             subplot(2,3,(out-1)*3+col);
-
-            plot(results(ic,1).t,results(ic,1).y(:,out), ...
-                'r--','LineWidth',1.2);
             hold on
 
-            plot(results(ic,2).t,results(ic,2).y(:,out), ...
-                'b','LineWidth',1.3);
+            h_pi = []; h_mit = []; h_ref = [];
 
-            plot(results(ic,2).t,results(ic,2).ym(:,out), ...
-                'k:','LineWidth',1.1);
+            if have_pi
+                h_pi = plot(results(ic,1).t,results(ic,1).y(:,out), ...
+                    'r--','LineWidth',1.2);
+            end
+
+            if have_mit
+                h_mit = plot(results(ic,2).t,results(ic,2).y(:,out), ...
+                    'b','LineWidth',1.3);
+                h_ref = plot(results(ic,2).t,results(ic,2).ym(:,out), ...
+                    'k:','LineWidth',1.1);
+            end
 
             grid on
             title(case_names{ic});
             xlabel('Time (hours)');
             ylabel(output_names{out});
-            legend('PI','MIT','Reference model', ...
-                'Location','best');
+
+            hnd = [h_pi;h_mit;h_ref];
+            lbl = {'PI','MIT','Reference model'};
+            lbl = lbl([~isempty(h_pi) ~isempty(h_mit) ~isempty(h_ref)]);
+
+            if ~isempty(hnd)
+                legend(hnd,lbl,'Location','best');
+            end
         end
     end
 end
 
-save('uncertainty_results.mat', ...
-    'results','cfg','p','xss');
+if ~isfield(cfg,'save_results') || cfg.save_results
+    save('uncertainty_results.mat','results','cfg','p','xss');
+else
+    fprintf('(results not saved: cfg.save_results = false)\n');
+end
 
 fprintf('\nUncertainty tests completed.\n');
 
@@ -231,6 +408,9 @@ y = reactor_output(x,p,t)-c.ybase;
 
 [u,raw,phi] = control_input(z,y,c,controller_id);
 
+% خطای نرمال‌شده برای e-modification (قبل از دینامیک لازم است)
+en_pre = (y-c.Cm*xm)./c.ys;
+
 %% ورودی واقعی راکتور
 
 pt = apply_flow_law( ...
@@ -240,7 +420,19 @@ pt = apply_flow_law( ...
     p.flowScenario);
 
 dx = steady_state_model(x,pt);
-dxm = c.Am*xm+c.Bm*c.r;
+
+% آنتی‌وایندآپ: ورودی مرجع «قابل دستیابی» + لیکیج مؤثر
+[r_eff, sigma_eff, ~] = mrac_antiwindup(c,u,raw,en_pre);
+
+if controller_id == 1 && ~c.aw_ref_pi
+    % برای PI، مدل مرجع فقط معیار سنجش است؛ عمداً با فرمان آرمانی
+    % نگه داشته می‌شود تا IAE با اجرای قبلی قابل مقایسه بماند.
+    r_model = c.r;
+else
+    r_model = r_eff;
+end
+
+dxm = c.Am*xm+c.Bm*r_model;
 
 %% کنترلر PI
 
@@ -267,13 +459,26 @@ end
 W = reshape(z(12:19),2,4);
 S = reshape(z(20:end),5,8);
 
-en = (y-c.Cm*xm)./c.ys;
+en = en_pre;
 
 % مدل حساسیت نامی ثابت باقی می‌ماند.
 % این حساسیت، تقریب مدل‌مبنا برای پلنت غیرخطی است.
 
-L = diag(double( ...
-    raw > c.u_min & raw < c.u_max));
+%% شاخص اشباع
+% پیوسته در [0,1] تا Acl ناپیوسته نشود و ode45 chatter نکند.
+if c.smooth_sat
+
+    k_s  = 200;
+    s_lo = 0.5*(1+tanh(k_s*(raw-c.u_min)));
+    s_hi = 0.5*(1+tanh(k_s*(c.u_max-raw)));
+    L    = diag(min(s_lo,s_hi));
+
+else
+
+    L = diag(double( ...
+        raw > c.u_min & raw < c.u_max));
+
+end
 
 Be = c.B*L*c.Umap;
 Acl = c.A-Be*W(:,3:4)*c.Cn;
@@ -282,15 +487,28 @@ dS = Acl*S+Be*kron(phi',eye(2));
 
 Psi = c.Cn*S;
 
-dW = reshape(-c.gamma.*(Psi'*en),2,4);
+%% نرمال‌سازی رگرسور: m2 = 1 + phi'*phi
+% بدون آن، بهره‌ی مؤثر تطبیق با اندازه‌ی سیگنال مقیاس می‌گیرد و قانون MIT
+% در برابر عدم‌قطعیت بهره‌ی پلنت (Ap) شکننده می‌شود.
+if c.adapt_normalize
+    m2 = 1+phi'*phi;
+else
+    m2 = 1;
+end
+
+if c.adapt_deadzone > 0 && norm(en) < c.adapt_deadzone
+    dW = zeros(2,4);
+else
+    dW = reshape(-c.gamma.*((Psi'*en)/m2),2,4);
+end
 
 %% نشتی و آنتی‌وایندآپ
 
-dW = dW-c.sigma*W;
+dW = dW-sigma_eff*W;
 
 virtual_sat_error = c.Umap\(u-raw);
 
-dW = dW+c.K_aw*virtual_sat_error*phi';
+dW = dW+c.K_aw*virtual_sat_error*phi'/m2;
 
 %% محدودسازی حرکت ضرایب
 
@@ -347,20 +565,26 @@ bad_real   = ~isreal(x);
 
 bad_x6 = false;
 bad_x7 = false;
+bad_I  = false;
+bad_M  = false;
 
-if ~bad_size && ~bad_finite && ~bad_real
-    bad_x6 = x(6) <= 0;
-    bad_x7 = x(7) < 0;
+if ~bad_size && ~bad_finite
+    xr     = real(x);
+    bad_I  = xr(1) < 0;    % غلظت آغازگر: منشأ واقعی خطا
+    bad_M  = xr(2) < 0;    % غلظت مونومر
+    bad_x6 = xr(6) <= 0;   % D1 = مخرج Mw
+    bad_x7 = xr(7) < 0;    % D2 = صورت Mw
 end
 
-if bad_size || bad_finite || bad_real || bad_x6 || bad_x7
+%% فقط اندازه‌ی غلط یا NaN/Inf غیرقابل ادامه است.
+%  مقادیر کمی منفی در نقاط آزمایشی ode45 طبیعی‌اند و در steady_state_model
+%  sanitize می‌شوند؛ بنابراین اینجا فقط (به‌صورت محدود) هشدار داده می‌شود.
+
+if bad_size || bad_finite
 
     fprintf(2,'\nInvalid state detected at t = %.10f\n',t);
     fprintf(2,'State size error: %d\n',bad_size);
     fprintf(2,'Non-finite state: %d\n',bad_finite);
-    fprintf(2,'Complex state: %d\n',bad_real);
-    fprintf(2,'x(6) <= 0: %d\n',bad_x6);
-    fprintf(2,'x(7) < 0: %d\n',bad_x7);
 
     disp('State vector:');
     disp(x.');
@@ -368,7 +592,28 @@ if bad_size || bad_finite || bad_real || bad_x6 || bad_x7
     error('Invalid nonlinear reactor state.');
 end
 
-Mw = p.Mm*x(7)/x(6);
+if bad_real || bad_I || bad_M || bad_x6 || bad_x7
+
+    persistent n_warn
+    if isempty(n_warn), n_warn = 0; end
+
+    if n_warn < 20
+        n_warn = n_warn+1;
+        fprintf(2,['[warn] out-of-domain state at t = %.4f h  ' ...
+            '(complex=%d, I<0=%d, M<0=%d, D1<=0=%d, D2<0=%d)\n'], ...
+            t,bad_real,bad_I,bad_M,bad_x6,bad_x7);
+    end
+end
+
+x  = max(real(x),0);
+
+if x(6) > 0
+    Mw = p.Mm*x(7)/x(6);
+else
+    Mw = 0;
+end
+
+Mw  = max(Mw,0);
 eta = 0.0012*Mw^0.71;
 
 y = [eta; x(3)];
@@ -379,20 +624,43 @@ end
 %% نمایش پیشرفت شبیه‌سازی
 %% =========================================================
 
-function status = ode_progress(t,~,flag)
+function status = ode_progress(t,y,flag,log_every)
+
+if nargin < 4 || isempty(log_every)
+    log_every = 25;
+end
 
 persistent last_time
 status = 0;
 
 if strcmp(flag,'init')
 
-    last_time = t(1);
+    if isempty(t)
+        last_time = 0;
+    else
+        last_time = t(1);
+    end
     fprintf('Simulation started at t = %.3f h\n',last_time);
 
 elseif isempty(flag)
 
-    if t(end)-last_time >= 1
-        fprintf('Simulation reached t = %.3f h\n',t(end));
+    if ~isempty(t) && t(end)-last_time >= log_every - 1e-9
+
+        % چاپ کم‌حجم + تشخیصی.
+        % نکته‌ی مهم: متلب y را در برخی فراخوانی‌ها با یک ستون (یا خالی)
+        % پاس می‌دهد؛ پس ایندکس‌کردن کورکورانه‌ی y(:,2) شبیه‌سازی را می‌کشد.
+        % هیچ خطای چاپی نباید اجرای حل‌گر را متوقف کند.
+
+        try
+            nx = size(y,2);
+            msg = sprintf('  t = %6.1f h | min I = %.3e',t(end),min(y(:,1)));
+            if nx >= 2, msg = [msg sprintf(' | min M = %.3e',min(y(:,2)))]; end
+            if nx >= 6, msg = [msg sprintf(' | min D1 = %.3e',min(y(:,6)))]; end
+            fprintf('%s\n',msg);
+        catch
+            % چاپ تشخیصی هرگز نباید اجرا را بشکند
+        end
+
         last_time = t(end);
     end
 

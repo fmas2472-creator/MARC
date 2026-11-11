@@ -273,7 +273,6 @@ end
 if opts.sweep
     fprintf('\n============== STABILITY MARGIN SWEEP ==============\n');
     
-    fprintf('W قفل‌شده (max|W| = %.3f)؛ فقط پارامتر پلنت تغییر می‌کند.\n',max(abs(W_nom(:))));
    sweep_fields = {'Ad','Ap','hA'};
    K = opts.k_range;
     MG = struct();
@@ -281,6 +280,7 @@ if opts.sweep
     if isempty(W_nom)
         W_nom = [eye(2) eye(2)];
     end
+    fprintf('W قفل‌شده (max|W| = %.3f)؛ فقط پارامتر پلنت تغییر می‌کند.\n',max(abs(W_nom(:))));
     Ky_nom = cfg.Umap*W_nom(:,3:4)*diag(1./cfg.ys);
 
     for f = 1:numel(sweep_fields)

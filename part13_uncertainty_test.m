@@ -117,7 +117,13 @@ factors = [1,0.8,1.2,0.8,1.2,0.8,1.2];
 
 controller_names = {'PI','MIT'};
 
-tgrid = linspace(0,par.t_final,par.n_samples);
+% افق شبیه‌سازی: قابل بازنویسی از بیرون با over.t_final
+t_end = par.t_final;
+if isfield(cfg,'t_final') && ~isempty(cfg.t_final)
+    t_end = cfg.t_final;
+end
+n_s = max(par.n_samples, round(t_end/par.t_final*par.n_samples));
+tgrid = linspace(0,t_end,n_s);
 
 % NonNegative مربوط به هفت حالت فیزیکی است.
 % تنظیمات حل‌گر: پیش‌فرض از Part 11؛ قابل بازنویسی برای جست‌وجوی سریع
@@ -152,7 +158,11 @@ for ic = cases
     else
         jc_list = 1:2;
     end
-
+    % Theta0 واقعاً مصرف‌شده: cfg بر par اولویت دارد (override باید اثر کند)
+    Theta0_used = par.Theta0;
+    if isfield(cfg,'Theta0') && ~isempty(cfg.Theta0)
+        Theta0_used = cfg.Theta0;
+    end
     for jc = jc_list
 
         if jc == 1
@@ -163,7 +173,7 @@ for ic = cases
             % هفت حالت واقعی + چهار حالت مرجع
             % + هشت ضریب W + چهل حالت حساسیت
             z0 = [xss; par.xm0; ...
-                  par.Theta0(:); par.S0(:)];
+                  Theta0_used(:); par.S0(:)];
         end
 
         % یک کیس خراب نباید کل مطالعه را از بین ببرد.
@@ -176,7 +186,7 @@ for ic = cases
                 @(t,z) uncertainty_ode(t,z,p_case,cfg,jc), ...
                 tgrid,z0,opts);
 
-            if isempty(tt) || tt(end) < par.t_final-1e-6
+             if isempty(tt) || tt(end) < t_end-1e-6
                 ok = false;
                 fail_msg = 'simulation did not reach t_final';
             end
@@ -232,9 +242,26 @@ for ic = cases
 
         iae = trapz(tt,abs(ee),1);
 
-        % خطای پایان اجرا نسبت به هدف ثابت
+              % خطای پایان اجرا نسبت به هدف ثابت
         final_error = yy(end,:)-cfg.target';
 
+        % زمان نشست: آخرین لحظه‌ای که خطا نسبت به هدف بیرون از باند ۵٪ است
+        % برای تغییر باند فقط settle_frac را عوض کن (۰.۰۲ = باند ۲٪)
+        settle_frac = 0.05;
+        band      = settle_frac*abs(cfg.target');
+        err_tgt   = yy - cfg.target';
+        t_settle  = nan(1,2);
+        for ch = 1:2
+            last_out = find(abs(err_tgt(:,ch)) > band(ch),1,'last');
+            if isempty(last_out)
+                t_settle(ch) = 0;              % از همان ابتدا داخل باند
+            elseif last_out < numel(tt)
+                t_settle(ch) = tt(last_out);
+            end                            % وگرنه NaN: در افق نشست نکرد
+        end
+
+        fprintf('  Settling (5%% band): eta = %.3g h , T = %.3g h\n', ...
+            t_settle(1),t_settle(2));
         saturation = trapz( ...
             tt,double(abs(uu-raw)>1e-6),1);
 
@@ -246,7 +273,7 @@ for ic = cases
         % شکست فیزیکی (نه عددی): آیا آغازگر شسته شد؟
         results(ic,jc).min_I       = min(ZZ(:,1));
         results(ic,jc).I_washout   = min(ZZ(:,1)) < 1e-2*xss(1);
-        results(ic,jc).sat_fraction = saturation/par.t_final;
+         results(ic,jc).sat_fraction = saturation/t_end;
         results(ic,jc).t = tt;
         results(ic,jc).y = yy;
         results(ic,jc).ym = ym;
@@ -255,12 +282,14 @@ for ic = cases
         results(ic,jc).IAE = iae;
         results(ic,jc).final_error = final_error;
         results(ic,jc).saturation = saturation;
-        % تشخیص: آیا ضرایب W به کران theta_min/theta_max چسبیدهاند؟
-        % z = [x(7); xm(4); W(8); S(40)]  →  W در ستونهای 12..19
+
+        % تشخیص: آیا ضرایب W به کران theta_min/theta_max چسبیده‌اند؟
+        % z = [x(7); xm(4); W(8); S(40)]  →  W در ستون‌های 12..19
         if jc == 2 && size(ZZ,2) >= 19
             results(ic,jc).W_final = ZZ(end,12:19);
             results(ic,jc).W_max   = max(abs(ZZ(end,12:19)));
         end
+
         fprintf('%s\n',controller_names{jc});
 
         fprintf('  Final target error: eta=% .6e, T=% .6e\n', ...
@@ -271,10 +300,12 @@ for ic = cases
 
         fprintf('  Saturation [h]: Qi=%.3f, Qc=%.3f\n', ...
             saturation(1),saturation(2));
+
         if isfield(results(ic,jc),'W_max') && ~isempty(results(ic,jc).W_max)
             fprintf('  max|W| = %.4f  (bound = %.3g)\n', ...
                 results(ic,jc).W_max,cfg.theta_max);
         end
+
         if results(ic,jc).I_washout
             fprintf(2,'  !! PHYSICAL FAILURE: initiator washout (min I = %.3e)\n', ...
                 results(ic,jc).min_I);
@@ -480,7 +511,9 @@ else
 
 end
 
-Be = c.B*L*c.Umap;
+% کف ۵٪ برای مدل حساسیت: اثر ورودی اضافی می‌خوابد، ولی یادگیری نه.
+L_s = max(L,0.05*eye(2));   % کف ۵٪ برای مدل حساسیت در اشباع
+Be  = c.B*L_s*c.Umap;
 Acl = c.A-Be*W(:,3:4)*c.Cn;
 
 dS = Acl*S+Be*kron(phi',eye(2));
@@ -652,10 +685,13 @@ elseif isempty(flag)
         % هیچ خطای چاپی نباید اجرای حل‌گر را متوقف کند.
 
         try
-            nx = size(y,2);
-            msg = sprintf('  t = %6.1f h | min I = %.3e',t(end),min(y(:,1)));
-            if nx >= 2, msg = [msg sprintf(' | min M = %.3e',min(y(:,2)))]; end
-            if nx >= 6, msg = [msg sprintf(' | min D1 = %.3e',min(y(:,6)))]; end
+            % y یک بردار ستونی است (z کامل: هفت حالت پلنت + مدل مرجع + ضرایب + حساسیت‌ها).
+            % پس حالت‌ها با ایندکس خوانده می‌شوند، نه با ستون.
+            % (size(y,2) همیشه ۱ است و منطق قدیمی را خراب می‌کرد.)
+            ny  = numel(y);
+            msg = sprintf('  t = %6.1f h | I = %.4e',t(end),y(1));
+            if ny >= 2, msg = [msg sprintf(' | M = %.4e',y(2))]; end
+            if ny >= 6, msg = [msg sprintf(' | D1 = %.4e',y(6))]; end
             fprintf('%s\n',msg);
         catch
             % چاپ تشخیصی هرگز نباید اجرا را بشکند

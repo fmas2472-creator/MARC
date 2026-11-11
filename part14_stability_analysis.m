@@ -270,17 +270,13 @@ end
 %% ------------------------------------------------------------------
 %% حاشیه‌ی پایداری: تا چه انحرافی پایدار می‌ماند؟
 %% ------------------------------------------------------------------
-
 if opts.sweep
-
     fprintf('\n============== STABILITY MARGIN SWEEP ==============\n');
+    
     fprintf('W قفل‌شده (max|W| = %.3f)؛ فقط پارامتر پلنت تغییر می‌کند.\n',max(abs(W_nom(:))));
-
-    sweep_fields = {'Ad','Ap','hA'};
-    K = opts.k_range;
-
+   sweep_fields = {'Ad','Ap','hA'};
+   K = opts.k_range;
     MG = struct();
-
     W_nom = Wc{1};
     if isempty(W_nom)
         W_nom = [eye(2) eye(2)];

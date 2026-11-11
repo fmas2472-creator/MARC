@@ -333,7 +333,13 @@ for case_id = 1:2
     % حالت پس از رفع محدودیت موقت
     c_free = c;
     c_free.K_aw = aw_values(case_id);
-
+    % حالت OFF: هر سه لایه‌ی آنتی‌وایندآپ خاموش، نه فقط K_aw
+    if case_id == 1
+        c_sat.K_aw_ref    = 0;
+        c_sat.aw_leakage  = false;
+        c_free.K_aw_ref   = 0;
+        c_free.aw_leakage = false;
+    end
     %% بخش اول: محدودیت Qc تا ساعت 60
 
     [tb,Xb] = ode45( ...

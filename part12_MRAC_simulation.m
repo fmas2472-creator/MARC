@@ -614,10 +614,14 @@ function dX = simple_mit_ode(~,X,c)
             (u_raw < c.u_max)));
 
     end
-    Be = c.B*L*c.Umap;
+        % کف ۵٪ برای مدل حساسیت: هنگام اشباع L→0 می‌شود، Be صفر، Psi صفر
+    % و تطبیق کاملاً می‌ایستد (یادگیری کور). با کف، اثر ورودی اضافی
+    % می‌خوابد ولی یادگیری نه. (آینه‌ی part13 خط ۵۲۳)
+    L_s = max(L,0.05*eye(2));
+
+    Be = c.B*L_s*c.Umap;
 
     Acl = c.A-Be*W(:,3:4)*c.Cn;
-
     S_dot = Acl*S + Be*kron(phi',eye(2));
 
     Psi = c.Cn*S;

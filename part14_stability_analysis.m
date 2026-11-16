@@ -273,6 +273,7 @@ end
 if opts.sweep
     fprintf('\n============== STABILITY MARGIN SWEEP ==============\n');
     
+    
    sweep_fields = {'Ad','Ap','hA'};
    K = opts.k_range;
     MG = struct();

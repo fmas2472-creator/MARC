@@ -179,7 +179,7 @@ c.smooth_sat      = true;   % شاخص اشباع پیوسته (بدون chatter
 c.aw_leakage = true;        % لیکیج وابسته به اشباع
 c.sigma_aw   = 0.05;        % حداکثر لیکیج اضافی (در اشباع کامل)
 c.sigma_e    = 0;           % e-modification: لیکیج متناسب با نرم خطا
-c.K_aw_ref   = 1;           % آنتی‌وایندآپ مدل مرجع (back-calculation روی r)
+c.K_aw_ref   = 0;           % آنتی‌وایندآپ مدل مرجع (back-calculation روی r)
 
 c.aw_ref_pi = false;        % آنتی‌وایندآپ مدل مرجع برای PI هم اعمال شود؟
                             % پیش‌فرض false: معیار IAE کنترل PI دست‌نخورده می‌ماند

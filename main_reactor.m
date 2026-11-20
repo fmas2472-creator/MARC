@@ -145,6 +145,11 @@ run('part11_MRAC_parameters.m');
 
 fprintf('[15/15] MRAC simulation...\n');
 run('part12_MRAC_simulation.m');
+fprintf('[16/17] Uncertainty test (Part 13)...\n');
+results = part13_uncertainty_test(p, X_linearization);
+
+fprintf('[17/17] Stability analysis (Part 14)...\n');
+stability = part14_stability_analysis(p, X_linearization);
 %% پایان اندازه‌گیری زمان اجرای بخش راکتور
 elapsed_reactor_time = toc(reactor_timer);
 

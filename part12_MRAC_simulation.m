@@ -85,7 +85,8 @@ X0 = [
     par.x0;
     par.xm0;
     W0(:);
-    S0(:)
+    S0(:);
+    0 % integral of the viscosity tracking error
 ];
 
 %% -------------------------------------------------
@@ -108,6 +109,11 @@ fprintf('MIT gains: %.4g, %.4g\n', ...
 fprintf('Leakage sigma: %.4g\n',c.sigma);
 
 fprintf('Anti-Windup gain: %.4g\n',c.K_aw);
+
+fprintf('Scheduled alpha: %.4g -> %.4g between t = %.4g h and %.4g h\n', ...
+        c.norm_alpha_start,c.norm_alpha,c.norm_alpha_t1,c.norm_alpha_t2);
+
+fprintf('Integral gain on viscosity: %.4g (from t = %.4g h)\n',c.K_int_eta,c.int_t_on);
 
 fprintf('Theta limits: [%.4g, %.4g]\n', ...
         c.theta_min,c.theta_max);
@@ -152,7 +158,7 @@ for k = 1:length(t)
         -y(k,:)'./c.ys
     ];
 
-    raw = c.Umap*W*phi;
+    raw = c.Umap*(W*phi+[c.K_int_eta*X(k,58); 0]);
 
     u_raw(k,:) = raw';
 
@@ -281,6 +287,27 @@ save('MRAC_MIT_simple_results.mat', ...
      't','X','y','ym','e','u','u_raw', ...
      'W_final','Kr_final','Ky_final','c');
 
+% Effective gain of the normalized MIT rule: gamma_eff = gamma/m2
+if isfield(c,'norm_alpha') && c.norm_alpha > 0
+    m2_hist = zeros(length(t),1);
+    for k = 1:length(t)
+        Psi_k = c.Cn*reshape(X(k,18:57),5,8);
+        m2_hist(k) = mrac_alpha(c,t(k))+sum(Psi_k(:).^2);
+    end
+    fprintf('\nNormalized MIT rule: m2 from %.3f to %.3f\n',min(m2_hist),max(m2_hist));
+    fprintf('alpha from %.3f to %.3f | integral state at the end = %.6f\n', ...
+        mrac_alpha(c,t(1)),mrac_alpha(c,t(end)),X(end,58));
+    fprintf('gamma_eta_eff from %.4f to %.4f | gamma_T_eff from %.4f to %.4f\n', ...
+        c.gamma(1)/max(m2_hist),c.gamma(1)/min(m2_hist), ...
+        c.gamma(2)/max(m2_hist),c.gamma(2)/min(m2_hist));
+    figure('Name','Normalized MIT - effective adaptation gain');
+    plot(t,c.gamma(1)./m2_hist,'b',t,c.gamma(2)./m2_hist,'r','LineWidth',1.4);
+    grid on
+    xlabel('Time (hours)');
+    ylabel('Effective gain = gamma / m2');
+    legend('gamma eta','gamma T','Location','best');
+end
+
 fprintf('\nPart 12 completed.\n');
 
 %% =====================================================================
@@ -362,7 +389,9 @@ for case_id = 1:2
     %% خروجی واقعی و مدل مرجع
 
     yy = (c.C*XX(:,1:5)')';
-    yym = (c.Cm*XX(:,6:9)')';
+    testAW(case_id).ym_hedged = (c.Cm*XX(:,6:9)')';   % hedged reference (for the plot)
+    [~,Xm_id] = ode45(@(t,x) c.Am*x+c.Bm*c.r,tt,par.xm0,opts);
+    yym = (c.Cm*Xm_id')';                             % ideal reference (for IAE)
 
     ee = yy-yym;
 
@@ -382,7 +411,7 @@ for case_id = 1:2
             -yy(k,:)'./c.ys
         ];
 
-        raw = c.Umap*Wk*phi_k;
+        raw = c.Umap*(Wk*phi_k+[c.K_int_eta*XX(k,58); 0]);
 
         % محدودیت مخصوص هر بخش
         if k <= n_before
@@ -442,7 +471,8 @@ for case_id = 1:2
     fprintf('\n========== AW %s ==========\n', ...
         aw_names{case_id});
 
-    fprintf('K_aw = %.4f\n',aw_values(case_id));
+    fprintf('K_aw = %.4f | K_aw_ref (hedge) = %.4f | aw_leakage = %d\n', ...
+        c_sat.K_aw,c_sat.K_aw_ref,c_sat.aw_leakage);
 
     fprintf('Saturation Qi = %.3f h\n',sat_duration(1));
     fprintf('Saturation Qc = %.3f h\n',sat_duration(2));
@@ -489,7 +519,9 @@ for j = 1:2
     xlabel('Time (hours)');
     ylabel(output_names{j});
 
-    legend('AW OFF','AW ON','Reference model', ...
+    plot(testAW(2).t,testAW(2).ym_hedged(:,j), ...
+        'm-.','LineWidth',1.1);
+    legend('AW OFF','AW ON','Reference model','Hedged reference (AW ON)', ...
         'Location','best');
 
 end
@@ -565,7 +597,7 @@ save('MRAC_MIT_simple_results.mat', ...
 %% تابع معادلات سیستم و قانون MIT
 %% =====================================================================
 
-function dX = simple_mit_ode(~,X,c)
+function dX = simple_mit_ode(t,X,c)
 
     %% استخراج حالت‌ها و ضرایب
 
@@ -575,7 +607,9 @@ function dX = simple_mit_ode(~,X,c)
 
     W = reshape(X(10:17),2,4);
 
-    S = reshape(X(18:end),5,8);
+    S = reshape(X(18:57),5,8);
+
+    zI = X(58); % integral of the viscosity tracking error
 
     %% خروجی‌ها و خطا در مقیاس جدید
 
@@ -592,7 +626,7 @@ function dX = simple_mit_ode(~,X,c)
         -yn
     ];
 
-    u_raw = c.Umap*W*phi;
+    u_raw = c.Umap*(W*phi+[c.K_int_eta*zI; 0]);
 
     %% اعمال محدودیت ورودی‌ها
 
@@ -641,7 +675,12 @@ function dX = simple_mit_ode(~,X,c)
     if isfield(c,'adapt_normalize') && ~c.adapt_normalize
         m2 = 1;
     else
-        m2 = 1 + phi'*phi;
+        if isfield(c,'norm_alpha') && c.norm_alpha > 0
+            % normalized MIT rule: denominator from the sensitivity Psi
+            m2 = mrac_alpha(c,t) + sum(Psi(:).^2);
+        else
+            m2 = 1 + phi'*phi;
+        end
     end
 
     w_dot_mit = -c.gamma .* ((Psi'*en)/m2);
@@ -655,9 +694,9 @@ function dX = simple_mit_ode(~,X,c)
     %  لایه ۱: r_eff  = ورودی مرجع قابل دستیابی (آشکارسازی اشباع در مدل مرجع)
     %  لایه ۲: sigma_eff = sigma + sigma_aw*sat_frac + sigma_e*||en||
 
-    [r_eff, sigma_eff] = mrac_antiwindup(c,u,u_raw,en);
+    [r_eff, sigma_eff] = mrac_antiwindup(c,u,u_raw,en,W(:,3:4));
 
-    W_dot = W_dot-sigma_eff*W;
+    W_dot = W_dot - c.sigma*W - (sigma_eff-c.sigma)*(W-c.Theta0);
 
     % back-calculation در مختصات W
     virtual_sat_error = c.Umap\sat_error;
@@ -690,6 +729,13 @@ function dX = simple_mit_ode(~,X,c)
 
        % ورودی مرجع «قابل دستیابی» 
     xm_dot = c.Am*xm+c.Bm*r_eff;
+
+    % Integral action on the viscosity tracking error.
+    % Off before int_t_on and while any valve is saturated.
+    zI_dot = 0;
+    if c.K_int_eta > 0 && t >= c.int_t_on && all(abs(sat_error) < 1e-9)
+        zI_dot = ymn(1)-yn(1);
+    end
     %% -------------------------------------------------
     %% خروجی تابع
     %% -------------------------------------------------
@@ -698,7 +744,8 @@ function dX = simple_mit_ode(~,X,c)
         x_dot;
         xm_dot;
         w_dot;
-        S_dot(:)
+        S_dot(:);
+        zI_dot
     ];
 
 end

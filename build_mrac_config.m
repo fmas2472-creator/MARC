@@ -102,6 +102,7 @@ c.theta_max = par.theta_max;
 
 c.K_aw  = par.K_aw;
 c.sigma = par.sigma;
+c.Theta0 = par.Theta0;      % initial weights = target of the saturation leakage
 
 if isfield(par,'epsilon'), c.epsilon = par.epsilon; else, c.epsilon = 0; end
 
@@ -172,14 +173,23 @@ assert(all(c.u_min < c.u_max),'Invalid physical input limits.');
 %% ۶) کلیدهای الگوریتم تطبیقی و آنتی‌وایندآپ
 %% ---------------------------------------------------------------
 
-c.adapt_normalize = true;   % dW = -gamma*(Psi'*en)/m2 ,  m2 = 1+phi'*phi
+c.adapt_normalize = true;   % dW = -gamma*(Psi'*en)/m2
+c.norm_alpha      = 2;      % normalized MIT rule: m2 = norm_alpha + ||Psi||^2
+                            % (Psi = sensitivity derivative; 0 = old form m2 = 1+phi'*phi)
+c.norm_alpha_start = 4; % scheduled alpha: value at t = 0 (0 = no schedule)
+c.norm_alpha_t1 = 10; % [h] alpha keeps the start value until t1
+c.norm_alpha_t2 = 30; % [h] alpha reaches norm_alpha at t2 (linear in between)
+c.K_int_eta = 0.1; % integral gain on the viscosity tracking error (0 = off)
+c.int_t_on = 30; % [h] the integral action starts at this time
+c.pi_decoupled = true; % PI baseline uses the same static decoupler as MRAC
 c.adapt_deadzone  = 0;      % ناحیه‌ی مرده روی نرم خطا
 c.smooth_sat      = true;   % شاخص اشباع پیوسته (بدون chatter در ode45)
 
 c.aw_leakage = true;        % لیکیج وابسته به اشباع
 c.sigma_aw   = 0.05;        % حداکثر لیکیج اضافی (در اشباع کامل)
 c.sigma_e    = 0;           % e-modification: لیکیج متناسب با نرم خطا
-c.K_aw_ref   = 0;           % آنتی‌وایندآپ مدل مرجع (back-calculation روی r)
+% K_aw_ref = reference-model hedging gain (0 = off)
+c.K_aw_ref   = 0.8;           % آنتی‌وایندآپ مدل مرجع (back-calculation روی r)
 
 c.aw_ref_pi = false;        % آنتی‌وایندآپ مدل مرجع برای PI هم اعمال شود؟
                             % پیش‌فرض false: معیار IAE کنترل PI دست‌نخورده می‌ماند

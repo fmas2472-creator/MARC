@@ -80,7 +80,7 @@ dQc_max = 300;
 %% فعلاً در قانون تطبیق اعمال نمی‌شوند.
 %% -------------------------------------------------
 
-K_aw = 1;
+K_aw = 0;      % back-calculation OFF (anti-windup = reference hedging + leakage, see build_mrac_config)
 sigma = 0.00;
 
 fprintf('MIT config: gamma_eta=%.3g | gamma_T=%.3g | sigma=%.3g | K_aw=%.3g\n',gamma_eta,gamma_T,sigma,K_aw);

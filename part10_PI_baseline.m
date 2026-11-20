@@ -78,7 +78,17 @@ title('PI Control - Temperature (T)')
 
 %% ذخیره کنترلرها
 
-save('PI_baseline.mat','C_eta','C_T');
+% Decoupled PI: the same static decoupler as MRAC is placed in front of the PI.
+% Plant seen by the PI = G5*inv(Kdc), DC gain = identity.
+Kdc_pi = dcgain(G5);
+G5_dec = G5*inv(Kdc_pi);
+C_eta_dec = pidtune(G5_dec(1,1),'PI');
+C_T_dec = pidtune(G5_dec(2,2),'PI');
+
+fprintf('\nDecoupled PI - eta: Kp = %.6f, Ki = %.6f\n',C_eta_dec.Kp,C_eta_dec.Ki);
+fprintf('Decoupled PI - T: Kp = %.6f, Ki = %.6f\n',C_T_dec.Kp,C_T_dec.Ki);
+
+save('PI_baseline.mat','C_eta','C_T','C_eta_dec','C_T_dec');
 
 
 fprintf('\nPI controllers saved.\n');

@@ -1,4 +1,4 @@
-function [r_eff, sigma_eff, sat_info] = mrac_antiwindup(c, u, u_raw, en)
+function [r_eff, sigma_eff, sat_info] = mrac_antiwindup(c, u, u_raw, en, Wy)
 %MRAC_ANTIWINDUP  ترم‌های آنتی‌وایندآپ مشترک Part 12 / Part 13 / Part 14.
 %
 %   [r_eff, sigma_eff, sat_info] = mrac_antiwindup(c, u, u_raw, en)
@@ -48,7 +48,15 @@ sat_info.saturated = any(abs(sat_err) > 1e-9);
 if isfield(c,'K_aw_ref') && c.K_aw_ref > 0
 
     if isfield(c,'Kmr') && isfield(c,'Kdc')
-        r_eff = c.r + c.K_aw_ref*(c.Kmr\(c.Kdc*sat_err));
+        % Reference-model hedging. Wy = W(:,3:4) = current feedback gain.
+        % Output deficit of the saturation through the CLOSED-loop DC gain:
+        %     dy = ys .* ((I + Wy) \ (Umap \ (u - u_raw)))
+        % Without Wy the old open-loop formula Kdc*(u - u_raw) is used.
+        dy_deficit = c.Kdc*sat_err;
+        if nargin >= 5 && ~isempty(Wy) && rcond(eye(2)+Wy) > 1e-6
+            dy_deficit = c.ys(:).*((eye(2)+Wy)\(c.Umap\sat_err));
+        end
+        r_eff = c.r + c.K_aw_ref*(c.Kmr\dy_deficit);
     else
         % اگر Kmr/Kdc موجود نبود، فقط نرمال‌سازی ساده انجام می‌شود.
         r_eff = c.r + c.K_aw_ref*sat_err./max(abs(c.u_max(:)-c.u_min(:)))*norm(c.r);

@@ -28,7 +28,7 @@ cases = cases(cases >= 1 & cases <= 7);
 % حالا فقط از منبع واحد ساخته می‌شود و اگر فایل کهنه باشد assert می‌گیرد.
 
 par     = load('MRAC_parameters.mat');
-pi_data = load('PI_baseline.mat','C_eta','C_T');
+pi_data = load('PI_baseline.mat');
 
 % تطابق فایل پارامترها با پلنت فعلی (جلوگیری از تناقض کهنه‌بودن)
 if all(isfield(par,{'Qi_bar','Qc_bar','Qm_bar'}))
@@ -57,11 +57,23 @@ if nargin >= 4 && ~isempty(cfg_override)
     end
 end
 
+% PI baseline: decoupled PI (same static decoupler as MRAC) or the two separate loops
+if isfield(cfg,'pi_decoupled') && cfg.pi_decoupled
+    assert(isfield(pi_data,'C_eta_dec'), ...
+        'PI_baseline.mat has no decoupled PI. Run main_reactor (Part 10) again.');
+    cfg.Kp = [pi_data.C_eta_dec.Kp; pi_data.C_T_dec.Kp];
+    cfg.Ki = [pi_data.C_eta_dec.Ki; pi_data.C_T_dec.Ki];
+end
+
 fprintf('\n--- Controller settings (single source: Part 11) ---\n');
 fprintf('adapt_normalize=%d | adapt_deadzone=%.3g | smooth_sat=%d\n', ...
     cfg.adapt_normalize,cfg.adapt_deadzone,cfg.smooth_sat);
 fprintf('aw_leakage=%d | sigma=%.4g | sigma_aw=%.4g | sigma_e=%.4g | K_aw=%.4g | K_aw_ref=%.4g\n', ...
     cfg.aw_leakage,cfg.sigma,cfg.sigma_aw,cfg.sigma_e,cfg.K_aw,cfg.K_aw_ref);
+fprintf('alpha: %.4g -> %.4g (t = %.4g..%.4g h) | K_int_eta=%.4g (from t = %.4g h)\n', ...
+    cfg.norm_alpha_start,cfg.norm_alpha,cfg.norm_alpha_t1,cfg.norm_alpha_t2,cfg.K_int_eta,cfg.int_t_on);
+fprintf('pi_decoupled=%d | PI gains used: Kp = [%.6f %.6f] , Ki = [%.6f %.6f]\n', ...
+    cfg.pi_decoupled,cfg.Kp(1),cfg.Kp(2),cfg.Ki(1),cfg.Ki(2));
 
 xss = xss(:);
 
@@ -173,7 +185,7 @@ for ic = cases
             % هفت حالت واقعی + چهار حالت مرجع
             % + هشت ضریب W + چهل حالت حساسیت
             z0 = [xss; par.xm0; ...
-                  Theta0_used(:); par.S0(:)];
+                  Theta0_used(:); par.S0(:); 0];
         end
 
         % یک کیس خراب نباید کل مطالعه را از بین ببرد.
@@ -235,7 +247,9 @@ for ic = cases
             raw(k,:) = rk';
         end
 
-        ym = (cfg.Cm*ZZ(:,8:11)')';
+        results(ic,jc).ym_hedged = (cfg.Cm*ZZ(:,8:11)')';   % hedged reference (stored only)
+        [~,Xm_id] = ode45(@(t,x) cfg.Am*x+cfg.Bm*cfg.r,tt,par.xm0,base_ode);
+        ym = (cfg.Cm*Xm_id')';                              % ideal reference (IAE, plots)
 
         % خطا نسبت به مدل مرجع
         ee = yy-ym;
@@ -453,7 +467,12 @@ pt = apply_flow_law( ...
 dx = steady_state_model(x,pt);
 
 % آنتی‌وایندآپ: ورودی مرجع «قابل دستیابی» + لیکیج مؤثر
-[r_eff, sigma_eff, ~] = mrac_antiwindup(c,u,raw,en_pre);
+Wy_now = [];                    % feedback gain for reference hedging (MIT only)
+if controller_id == 2
+    W_now  = reshape(z(12:19),2,4);
+    Wy_now = W_now(:,3:4);
+end
+[r_eff, sigma_eff, ~] = mrac_antiwindup(c,u,raw,en_pre,Wy_now);
 
 if controller_id == 1 && ~c.aw_ref_pi
     % برای PI، مدل مرجع فقط معیار سنجش است؛ عمداً با فرمان آرمانی
@@ -481,6 +500,11 @@ if controller_id == 1
 
     di(blocked) = 0;
 
+    if isfield(c,'pi_decoupled') && c.pi_decoupled
+        % decoupled PI: integrators in input units, back-calculation anti-windup
+        di = c.Kdc\(c.Ki.*error_pi)+mean(c.Ki./c.Kp)*(u-raw);
+    end
+
     dz = [dx; dxm; di];
     return
 end
@@ -488,7 +512,7 @@ end
 %% کنترلر MIT
 
 W = reshape(z(12:19),2,4);
-S = reshape(z(20:end),5,8);
+S = reshape(z(20:59),5,8);
 
 en = en_pre;
 
@@ -524,7 +548,12 @@ Psi = c.Cn*S;
 % بدون آن، بهره‌ی مؤثر تطبیق با اندازه‌ی سیگنال مقیاس می‌گیرد و قانون MIT
 % در برابر عدم‌قطعیت بهره‌ی پلنت (Ap) شکننده می‌شود.
 if c.adapt_normalize
-    m2 = 1+phi'*phi;
+    if isfield(c,'norm_alpha') && c.norm_alpha > 0
+        % normalized MIT rule: denominator from the sensitivity Psi
+        m2 = mrac_alpha(c,t)+sum(Psi(:).^2);
+    else
+        m2 = 1+phi'*phi;
+    end
 else
     m2 = 1;
 end
@@ -537,7 +566,7 @@ end
 
 %% نشتی و آنتی‌وایندآپ
 
-dW = dW-sigma_eff*W;
+dW = dW - c.sigma*W - (sigma_eff-c.sigma)*(W-c.Theta0);
 
 virtual_sat_error = c.Umap\(u-raw);
 
@@ -548,7 +577,14 @@ dW = dW+c.K_aw*virtual_sat_error*phi'/m2;
 dW(W >= c.theta_max & dW > 0) = 0;
 dW(W <= c.theta_min & dW < 0) = 0;
 
-dz = [dx; dxm; dW(:); dS(:)];
+% Integral action on the viscosity tracking error.
+% Off before int_t_on and while any valve is saturated.
+dzI = 0;
+if c.K_int_eta > 0 && t >= c.int_t_on && all(abs(u-raw) < 1e-9)
+    dzI = -en(1);
+end
+
+dz = [dx; dxm; dW(:); dS(:); dzI];
 
 end
 
@@ -564,7 +600,11 @@ if controller_id == 1
 
     integral_input = z(12:13);
 
-    raw = c.Kp.*(c.target-y)+integral_input;
+    if isfield(c,'pi_decoupled') && c.pi_decoupled
+        raw = c.Kdc\(c.Kp.*(c.target-y))+integral_input; % decoupled PI
+    else
+        raw = c.Kp.*(c.target-y)+integral_input;
+    end
 
 else
 
@@ -572,7 +612,7 @@ else
 
     phi = [c.r./c.ys; -y./c.ys];
 
-    raw = c.Umap*W*phi;
+    raw = c.Umap*(W*phi+[c.K_int_eta*z(60); 0]);
 
 end
 

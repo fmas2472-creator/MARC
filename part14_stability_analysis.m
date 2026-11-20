@@ -55,7 +55,7 @@ assert(numel(xss) == 7,'نقطه‌کار باید هفت‌حالته باشد.
 par = load('MRAC_parameters.mat');
 
 if exist('PI_baseline.mat','file') == 2
-    pi_data = load('PI_baseline.mat','C_eta','C_T');
+    pi_data = load('PI_baseline.mat');
     ctl_opts.Kp = [pi_data.C_eta.Kp; pi_data.C_T.Kp];
     ctl_opts.Ki = [pi_data.C_eta.Ki; pi_data.C_T.Ki];
     has_pi = true;
@@ -66,6 +66,14 @@ else
 end
 
 cfg = build_mrac_config(par,ctl_opts);
+
+% PI baseline: decoupled PI (integrators in input units) or the two separate loops
+Dpi = eye(2);
+if has_pi && isfield(cfg,'pi_decoupled') && cfg.pi_decoupled && isfield(pi_data,'C_eta_dec')
+    ctl_opts.Kp = [pi_data.C_eta_dec.Kp; pi_data.C_T_dec.Kp];
+    ctl_opts.Ki = [pi_data.C_eta_dec.Ki; pi_data.C_T_dec.Ki];
+    Dpi = inv(cfg.Kdc);
+end
 
 fprintf('\n============================================================\n');
 fprintf(' PART 14 — STABILITY ANALYSIS UNDER +-20%% UNCERTAINTY\n');
@@ -170,6 +178,10 @@ for ic = 1:nC
         Ky = cfg.Umap*Wk(:,3:4)*diag(1./cfg.ys);
 
         Am_cl = Aj - Bj*Ky*Cj;
+        if isfield(cfg,'K_int_eta') && cfg.K_int_eta > 0
+            % integral action on viscosity adds one state to the frozen loop
+            Am_cl = [Am_cl , Bj*cfg.Umap(:,1)*cfg.K_int_eta ; -Cj(1,:)/cfg.ys(1) , 0];
+        end
         em = eig(Am_cl);
         eig_mrac{ic} = em;
         lam_mrac(ic) = max(real(em));
@@ -183,7 +195,7 @@ for ic = 1:nC
         if has_pi
             Kp = diag(ctl_opts.Kp);
             Ki = diag(ctl_opts.Ki);
-            Ap_cl = [ Aj-Bj*Kp*Cj , Bj ; -Ki*Cj , zeros(2) ];
+            Ap_cl = [ Aj-Bj*(Dpi*Kp)*Cj , Bj ; -(Dpi*Ki)*Cj , zeros(2) ];
             ep = eig(Ap_cl);
             eig_pi{ic} = ep;
             lam_pi(ic) = max(real(ep));
@@ -294,7 +306,11 @@ if opts.sweep
             pq.(fld) = K(q)*p.(fld);
             try
                 evalc('[Aq,Bq,Cq,~] = linearize_cstr_numeric(xss,pq);');
-                lam(q) = max(real(eig(Aq-Bq*Ky_nom*Cq)));
+                Aq_cl = Aq-Bq*Ky_nom*Cq;
+                if isfield(cfg,'K_int_eta') && cfg.K_int_eta > 0
+                    Aq_cl = [Aq_cl , Bq*cfg.Umap(:,1)*cfg.K_int_eta ; -Cq(1,:)/cfg.ys(1) , 0];
+                end
+                lam(q) = max(real(eig(Aq_cl)));
             catch
                 lam(q) = nan;
             end
